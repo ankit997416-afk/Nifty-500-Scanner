@@ -2,21 +2,22 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
 import time
 
-st.set_page_config(layout="wide")
-st.title("Smart Stock Analyzer (Trend + Fundamentals + Risk)")
+st.set_page_config(page_title="Smart Stock Analyzer", layout="wide")
 
-symbol = st.text_input("Enter NSE Symbol (Example: TCS.NS)")
+st.title("📈 Smart Stock Analyzer")
+st.caption("Trend + Fundamentals + Risk + Return Probability")
 
-# ---------------- SAFE DOWNLOAD ----------------
-@st.cache_data(ttl=3600)   # 1 hour cache prevents rate limit
-import requests
+symbol = st.text_input("Enter NSE Symbol (Example: TCS.NS)", value="TCS.NS")
 
+
+# ===================== PRICE LOADER (Yahoo + NSE Fallback) =====================
 @st.cache_data(ttl=3600)
 def load_price(symbol):
 
-    # ---------- TRY YAHOO ----------
+    # ---- TRY YAHOO ----
     try:
         ticker = yf.Ticker(symbol)
         df = ticker.history(period="2y", auto_adjust=True)
@@ -25,21 +26,19 @@ def load_price(symbol):
     except:
         pass
 
-    # ---------- FALLBACK NSE ----------
+    # ---- NSE FALLBACK ----
     try:
         base = symbol.replace(".NS","")
         url = f"https://www.nseindia.com/api/chart-databyindex?index={base}"
-        
+
         headers = {
             "User-Agent": "Mozilla/5.0",
             "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
             "Referer": "https://www.nseindia.com/"
         }
 
         session = requests.Session()
         session.get("https://www.nseindia.com", headers=headers, timeout=5)
-
         data = session.get(url, headers=headers, timeout=5).json()
 
         prices = pd.DataFrame(data['grapthData'], columns=['timestamp','Close'])
@@ -48,38 +47,12 @@ def load_price(symbol):
         prices.drop(columns=['timestamp'], inplace=True)
 
         return prices
-
     except:
         return None
-def load_price(symbol):
-    for i in range(3):   # retry 3 times
-        try:
-            ticker = yf.Ticker(symbol)
-            df = ticker.history(period="2y", auto_adjust=True)
-            if len(df) > 0:
-                return df
-        except:
-            time.sleep(2)
-    return None
 
-@st.cache_data(ttl=3600)
-def load_info(symbol):
-    try:
-        ticker = yf.Ticker(symbol)
-        return ticker.info
-    except:
-        return {}
 
-@st.cache_data(ttl=3600)
-def load_financials(symbol):
-    try:
-        ticker = yf.Ticker(symbol)
-        return ticker.balance_sheet, ticker.cashflow
-    except:
-        return None, None
-
-# ---------------- TECHNICAL ----------------
-def technical_analysis(df):
+# ===================== TECHNICAL ANALYSIS =====================
+def technical_score(df):
     df['50MA'] = df['Close'].rolling(50).mean()
     df['150MA'] = df['Close'].rolling(150).mean()
     df['200MA'] = df['Close'].rolling(200).mean()
@@ -91,10 +64,22 @@ def technical_analysis(df):
     if latest['50MA'] > latest['150MA']: score += 1
     if latest['150MA'] > latest['200MA']: score += 1
 
+    # Momentum
+    momentum = (df['Close'].iloc[-1] / df['Close'].iloc[-120]) - 1
+    if momentum > 0.15: score += 1
+
     return score, df
 
-# ---------------- FUNDAMENTAL ----------------
-def fundamental_check(info):
+
+# ===================== FUNDAMENTALS =====================
+@st.cache_data(ttl=3600)
+def get_info(symbol):
+    try:
+        return yf.Ticker(symbol).info
+    except:
+        return {}
+
+def fundamental_score(info):
     score = 0
 
     if info.get("revenueGrowth",0) > 0.10: score += 1
@@ -104,14 +89,24 @@ def fundamental_check(info):
 
     return score
 
-# ---------------- RISK ----------------
-def risk_check(bs, cf):
+
+# ===================== RISK CHECK (Banker Logic) =====================
+@st.cache_data(ttl=3600)
+def get_fin(symbol):
+    try:
+        t = yf.Ticker(symbol)
+        return t.balance_sheet, t.cashflow
+    except:
+        return None, None
+
+def risk_score(bs, cf):
     score = 0
     try:
         total_debt = bs.loc["Total Debt"][0]
         equity = bs.loc["Total Stockholder Equity"][0]
         fixed_assets = bs.loc["Property Plant Equipment"][0]
 
+        # ALM safety
         if equity > fixed_assets:
             score += 1
 
@@ -124,35 +119,46 @@ def risk_check(bs, cf):
 
     return score
 
-# ---------------- RUN ----------------
+
+# ===================== QUANT PROBABILITY MODEL =====================
+def probability_model(t,f,r):
+    raw = (t*0.4 + f*0.35 + r*0.25)
+    prob = min(max(int(raw/4*100),5),95)
+    return prob
+
+
+# ===================== RUN =====================
 if symbol:
 
     df = load_price(symbol)
 
-    if df is None or len(df) < 200:
-        st.error("Data unavailable or Yahoo blocked request. Try again later.")
+    if df is None:
+        st.error("Unable to fetch data currently. Try another stock.")
         st.stop()
 
-    info = load_info(symbol)
-    bs, cf = load_financials(symbol)
+    info = get_info(symbol)
+    bs, cf = get_fin(symbol)
 
-    t_score, df = technical_analysis(df)
-    f_score = fundamental_check(info)
-    r_score = risk_check(bs, cf)
+    t = technical_score(df)[0]
+    f = fundamental_score(info)
+    r = risk_score(bs, cf)
 
-    total = t_score + f_score + r_score
+    prob = probability_model(t,f,r)
 
-    st.subheader("Result")
+    # ---------- DISPLAY ----------
+    col1,col2,col3,col4 = st.columns(4)
 
-    if total >= 6:
+    col1.metric("📊 Technical", t)
+    col2.metric("🏢 Fundamental", f)
+    col3.metric("🛡 Risk Safety", r)
+    col4.metric("🎯 Return Probability", f"{prob}%")
+
+    if prob > 70:
         st.success("🟢 Strong Candidate")
-    elif total >= 4:
+    elif prob > 50:
         st.warning("🟡 Watchlist")
     else:
         st.error("🔴 Avoid")
 
-    st.write("Technical Score:", t_score)
-    st.write("Fundamental Score:", f_score)
-    st.write("Risk Score:", r_score)
-
+    st.subheader("Trend Chart")
     st.line_chart(df[['Close','50MA','150MA','200MA']])
