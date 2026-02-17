@@ -11,6 +11,46 @@ symbol = st.text_input("Enter NSE Symbol (Example: TCS.NS)")
 
 # ---------------- SAFE DOWNLOAD ----------------
 @st.cache_data(ttl=3600)   # 1 hour cache prevents rate limit
+import requests
+
+@st.cache_data(ttl=3600)
+def load_price(symbol):
+
+    # ---------- TRY YAHOO ----------
+    try:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="2y", auto_adjust=True)
+        if len(df) > 200:
+            return df
+    except:
+        pass
+
+    # ---------- FALLBACK NSE ----------
+    try:
+        base = symbol.replace(".NS","")
+        url = f"https://www.nseindia.com/api/chart-databyindex?index={base}"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://www.nseindia.com/"
+        }
+
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=5)
+
+        data = session.get(url, headers=headers, timeout=5).json()
+
+        prices = pd.DataFrame(data['grapthData'], columns=['timestamp','Close'])
+        prices['Date'] = pd.to_datetime(prices['timestamp'], unit='ms')
+        prices.set_index('Date', inplace=True)
+        prices.drop(columns=['timestamp'], inplace=True)
+
+        return prices
+
+    except:
+        return None
 def load_price(symbol):
     for i in range(3):   # retry 3 times
         try:
