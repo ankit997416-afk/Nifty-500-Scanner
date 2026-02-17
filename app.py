@@ -2,106 +2,93 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import ta
 
-st.title("📊 NIFTY 500 Swing Scanner")
-st.write("Low Frequency Weighted Model")
+st.set_page_config(layout="wide")
 
-MIN_MARKET_CAP = 5000  # Crores
-MIN_AVG_VOLUME = 500000
-BUY_SCORE_THRESHOLD = 70
+st.title("Smart Stock Analyzer (Trend + Fundamentals + Risk)")
 
-WEIGHTS = {
-    "RSI": 20,
-    "MACD": 20,
-    "MA_STRUCTURE": 25,
-    "ATR_BREAKOUT": 20,
-    "VOLUME": 15
-}
+symbol = st.text_input("Enter NSE Symbol (Example: TCS.NS)")
 
-@st.cache_data
-def get_nifty500():
-    url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
-    df = pd.read_csv(url)
-    return [symbol + ".NS" for symbol in df['Symbol'].tolist()]
+# ---------------- TECHNICAL ANALYSIS ----------------
+def technical_analysis(df):
+    df['50MA'] = df['Close'].rolling(50).mean()
+    df['150MA'] = df['Close'].rolling(150).mean()
+    df['200MA'] = df['Close'].rolling(200).mean()
 
-def analyze_stock(symbol):
+    latest = df.iloc[-1]
+
+    trend_score = 0
+    if latest['Close'] > latest['50MA']: trend_score += 1
+    if latest['50MA'] > latest['150MA']: trend_score += 1
+    if latest['150MA'] > latest['200MA']: trend_score += 1
+
+    return trend_score, df
+
+# ---------------- FUNDAMENTAL CHECK ----------------
+def fundamental_check(ticker):
+    info = ticker.info
+    score = 0
+
     try:
-        df = yf.download(symbol, period="6mo", interval="1d", progress=False)
-        if len(df) < 100:
-            return None
+        if info.get("revenueGrowth",0) > 0.10: score += 1
+        if info.get("earningsGrowth",0) > 0.10: score += 1
+        if info.get("returnOnEquity",0) > 0.15: score += 1
+        if info.get("operatingMargins",0) > 0.15: score += 1
+    except:
+        pass
 
-        info = yf.Ticker(symbol).info
-        market_cap = info.get("marketCap", 0)
-        avg_volume = info.get("averageVolume", 0)
+    return score, info
 
-        market_cap_cr = market_cap / 1e7
+# ---------------- RISK ANALYSIS ----------------
+def risk_check(ticker):
+    score = 0
+    try:
+        bs = ticker.balance_sheet
+        cf = ticker.cashflow
 
-        if market_cap_cr < MIN_MARKET_CAP or avg_volume < MIN_AVG_VOLUME:
-            return None
+        total_debt = bs.loc["Total Debt"][0]
+        equity = bs.loc["Total Stockholder Equity"][0]
+        fixed_assets = bs.loc["Property Plant Equipment"][0]
 
-        df["RSI"] = ta.momentum.RSIIndicator(df["Close"], window=14).rsi()
-        macd = ta.trend.MACD(df["Close"])
-        df["MACD"] = macd.macd()
-        df["MACD_signal"] = macd.macd_signal()
-        df["ATR"] = ta.volatility.AverageTrueRange(
-            df["High"], df["Low"], df["Close"], window=14
-        ).average_true_range()
+        # ALM check
+        if equity > fixed_assets:
+            score += 1
 
-        df["MA50"] = df["Close"].rolling(50).mean()
-        df["MA200"] = df["Close"].rolling(200).mean()
-        df["VolumeAvg"] = df["Volume"].rolling(20).mean()
-
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        score = 0
-
-        if 50 < latest["RSI"] < 65:
-            score += WEIGHTS["RSI"]
-
-        if latest["MACD"] > latest["MACD_signal"] and prev["MACD"] <= prev["MACD_signal"]:
-            score += WEIGHTS["MACD"]
-
-        if latest["Close"] > latest["MA50"] > latest["MA200"]:
-            score += WEIGHTS["MA_STRUCTURE"]
-
-        if latest["Close"] > df["Close"].rolling(20).max().iloc[-2] and \
-           latest["ATR"] > df["ATR"].rolling(20).mean().iloc[-1]:
-            score += WEIGHTS["ATR_BREAKOUT"]
-
-        if latest["Volume"] > latest["VolumeAvg"]:
-            score += WEIGHTS["VOLUME"]
-
-        if score >= BUY_SCORE_THRESHOLD:
-            return {
-                "Symbol": symbol,
-                "Score": score,
-                "RSI": round(latest["RSI"], 2),
-                "Price": round(latest["Close"], 2)
-            }
+        # Cash flow check
+        op_cash = cf.loc["Total Cash From Operating Activities"][0]
+        if op_cash > 0:
+            score += 1
 
     except:
-        return None
+        pass
 
-    return None
+    return score
 
+# ---------------- RUN ----------------
+if symbol:
+    ticker = yf.Ticker(symbol)
 
-if st.button("🔍 Scan NIFTY 500"):
-    symbols = get_nifty500()
-    results = []
+    df = ticker.history(period="2y")
 
-    progress_bar = st.progress(0)
+    if len(df) > 200:
 
-    for i, stock in enumerate(symbols):
-        signal = analyze_stock(stock)
-        if signal:
-            results.append(signal)
-        progress_bar.progress((i + 1) / len(symbols))
+        t_score, df = technical_analysis(df)
+        f_score, info = fundamental_check(ticker)
+        r_score = risk_check(ticker)
 
-    if results:
-        results_df = pd.DataFrame(results).sort_values(by="Score", ascending=False)
-        st.success("Strong Buy Signals Found")
-        st.dataframe(results_df)
-    else:
-        st.warning("No strong signals today.")
+        total = t_score + f_score + r_score
+
+        st.subheader("Result")
+
+        if total >= 6:
+            st.success("🟢 Strong Candidate")
+        elif total >= 4:
+            st.warning("🟡 Watchlist")
+        else:
+            st.error("🔴 Avoid")
+
+        st.write("Technical Score:", t_score)
+        st.write("Fundamental Score:", f_score)
+        st.write("Risk Score:", r_score)
+
+        st.line_chart(df[['Close','50MA','150MA','200MA']])
