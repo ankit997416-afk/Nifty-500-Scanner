@@ -8,69 +8,60 @@ st.set_page_config(page_title="Smart Stock Analyzer", layout="wide")
 st.title("📈 Smart Stock Analyzer")
 st.caption("Trend + Fundamentals + Risk + Probability")
 
+# ---------- STOCK INPUT ----------
 symbol = st.text_input("Enter NSE Symbol (Example: TCS.NS)", value="TCS.NS")
 
+# ---------- LIQUID STOCK UNIVERSE ----------
+SCAN_LIST = [
+"RELIANCE.NS","TCS.NS","HDFCBANK.NS","ICICIBANK.NS","INFY.NS",
+"ITC.NS","LT.NS","SBIN.NS","BHARTIARTL.NS","ASIANPAINT.NS",
+"AXISBANK.NS","KOTAKBANK.NS","BAJFINANCE.NS","MARUTI.NS","TITAN.NS",
+"ULTRACEMCO.NS","SUNPHARMA.NS","HCLTECH.NS","WIPRO.NS","ONGC.NS"
+]
 
-# ---------------- PRICE LOADER ----------------
+# ---------- PRICE LOADER ----------
 @st.cache_data(ttl=3600)
 def load_price(symbol):
-
-    # YAHOO
     try:
         df = yf.Ticker(symbol).history(period="2y", auto_adjust=True)
-        if len(df) > 50:
+        if len(df) > 10:
             return df
     except:
         pass
+    return None
 
-    # NSE FALLBACK
-    try:
-        base = symbol.replace(".NS","")
-        url = f"https://www.nseindia.com/api/chart-databyindex?index={base}"
-
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://www.nseindia.com/"
-        }
-
-        s = requests.Session()
-        s.get("https://www.nseindia.com", headers=headers, timeout=5)
-        data = s.get(url, headers=headers, timeout=5).json()
-
-        prices = pd.DataFrame(data['grapthData'], columns=['timestamp','Close'])
-        prices['Date'] = pd.to_datetime(prices['timestamp'], unit='ms')
-        prices.set_index('Date', inplace=True)
-        prices.drop(columns=['timestamp'], inplace=True)
-
-        return prices
-    except:
-        return None
-
-
-# ---------------- TECHNICAL ----------------
+# ---------- TECHNICAL ----------
 def technical_score(df):
-
-    if len(df) < 200:
-        return 0, df, False   # insufficient data
-
-    df['50MA'] = df['Close'].rolling(50).mean()
-    df['150MA'] = df['Close'].rolling(150).mean()
-    df['200MA'] = df['Close'].rolling(200).mean()
-
-    latest = df.iloc[-1]
+    n = len(df)
     score = 0
 
-    if latest['Close'] > latest['50MA']: score += 1
-    if latest['50MA'] > latest['150MA']: score += 1
-    if latest['150MA'] > latest['200MA']: score += 1
+    if n >= 200:
+        df['50MA']=df['Close'].rolling(50).mean()
+        df['150MA']=df['Close'].rolling(150).mean()
+        df['200MA']=df['Close'].rolling(200).mean()
+        latest=df.iloc[-1]
+        if latest['Close']>latest['50MA']:score+=1
+        if latest['50MA']>latest['150MA']:score+=1
+        if latest['150MA']>latest['200MA']:score+=1
+        if (df['Close'].iloc[-1]/df['Close'].iloc[-120]-1)>0.15:score+=1
+        return score,"Long Trend"
 
-    momentum = (df['Close'].iloc[-1] / df['Close'].iloc[-120]) - 1
-    if momentum > 0.15: score += 1
+    elif n>=50:
+        df['20MA']=df['Close'].rolling(20).mean()
+        df['50MA']=df['Close'].rolling(50).mean()
+        latest=df.iloc[-1]
+        if latest['Close']>latest['20MA']:score+=1
+        if latest['20MA']>latest['50MA']:score+=1
+        if (df['Close'].iloc[-1]/df['Close'].iloc[-40]-1)>0.08:score+=1
+        return score,"Swing Trend"
 
-    return score, df, True
+    elif n>=20:
+        if (df['Close'].iloc[-1]/df['Close'].iloc[-20]-1)>0.05:score+=1
+        return score,"Short Momentum"
 
+    return 0,"Too Little Data"
 
-# ---------------- FUNDAMENTAL ----------------
+# ---------- FUNDAMENTAL ----------
 @st.cache_data(ttl=3600)
 def get_info(symbol):
     try:
@@ -79,77 +70,85 @@ def get_info(symbol):
         return {}
 
 def fundamental_score(info):
-    score = 0
-    if info.get("revenueGrowth",0) > 0.10: score += 1
-    if info.get("earningsGrowth",0) > 0.10: score += 1
-    if info.get("returnOnEquity",0) > 0.15: score += 1
-    if info.get("operatingMargins",0) > 0.15: score += 1
+    score=0
+    if info.get("revenueGrowth",0)>0.10:score+=1
+    if info.get("earningsGrowth",0)>0.10:score+=1
+    if info.get("returnOnEquity",0)>0.15:score+=1
+    if info.get("operatingMargins",0)>0.15:score+=1
     return score
 
-
-# ---------------- RISK ----------------
+# ---------- RISK ----------
 @st.cache_data(ttl=3600)
 def get_fin(symbol):
     try:
-        t = yf.Ticker(symbol)
-        return t.balance_sheet, t.cashflow
+        t=yf.Ticker(symbol)
+        return t.balance_sheet,t.cashflow
     except:
-        return None, None
+        return None,None
 
-def risk_score(bs, cf):
-    score = 0
+def risk_score(bs,cf):
+    score=0
     try:
-        total_debt = bs.loc["Total Debt"][0]
-        equity = bs.loc["Total Stockholder Equity"][0]
-        fixed_assets = bs.loc["Property Plant Equipment"][0]
-        if equity > fixed_assets: score += 1
-
-        op_cash = cf.loc["Total Cash From Operating Activities"][0]
-        if op_cash > 0: score += 1
+        debt=bs.loc["Total Debt"][0]
+        equity=bs.loc["Total Stockholder Equity"][0]
+        fa=bs.loc["Property Plant Equipment"][0]
+        if equity>fa:score+=1
+        ocf=cf.loc["Total Cash From Operating Activities"][0]
+        if ocf>0:score+=1
     except:
         pass
     return score
 
-
-# ---------------- PROBABILITY ----------------
+# ---------- PROBABILITY ----------
 def probability(t,f,r):
-    raw = t*0.45 + f*0.35 + r*0.20
+    raw=t*0.45+f*0.35+r*0.20
     return min(max(int(raw/4*100),5),95)
 
+# ---------- SINGLE STOCK ANALYSIS ----------
+def analyze(symbol):
+    df=load_price(symbol)
+    if df is None: return None
 
-# ---------------- RUN ----------------
+    t,trend=technical_score(df)
+    f=fundamental_score(get_info(symbol))
+    bs,cf=get_fin(symbol)
+    r=risk_score(bs,cf)
+    p=probability(t,f,r)
+
+    return {"Symbol":symbol,"Trend":trend,"Tech":t,"Fund":f,"Risk":r,"Prob":p,"df":df}
+
+# ---------- RUN SINGLE ----------
 if symbol:
+    res=analyze(symbol)
+    if res:
+        c1,c2,c3,c4=st.columns(4)
+        c1.metric("Technical",res["Tech"])
+        c2.metric("Fundamental",res["Fund"])
+        c3.metric("Risk Safety",res["Risk"])
+        c4.metric("Return Probability",f'{res["Prob"]}%')
 
-    df = load_price(symbol)
+        st.info(f'Model: {res["Trend"]}')
 
-    if df is None or len(df)==0:
-        st.error("Unable to fetch price data currently.")
-        st.stop()
+        if res["Prob"]>70:st.success("🟢 Strong Candidate")
+        elif res["Prob"]>50:st.warning("🟡 Watchlist")
+        else:st.error("🔴 Avoid")
 
-    t,df,ok = technical_score(df)
+        st.line_chart(res["df"]["Close"])
 
-    if not ok:
-        st.warning("Not enough historical data for full technical analysis.")
-        st.line_chart(df['Close'])
-        st.stop()
+# ---------- AUTO SCANNER ----------
+st.divider()
+st.subheader("🔎 Auto Find Strong Stocks")
 
-    info = get_info(symbol)
-    f = fundamental_score(info)
+if st.button("Scan Market Leaders"):
+    results=[]
+    progress=st.progress(0)
 
-    bs,cf = get_fin(symbol)
-    r = risk_score(bs,cf)
+    for i,s in enumerate(SCAN_LIST):
+        r=analyze(s)
+        if r: results.append(r)
+        progress.progress((i+1)/len(SCAN_LIST))
 
-    prob = probability(t,f,r)
-
-    c1,c2,c3,c4 = st.columns(4)
-    c1.metric("Technical",t)
-    c2.metric("Fundamental",f)
-    c3.metric("Risk Safety",r)
-    c4.metric("Return Probability",f"{prob}%")
-
-    if prob>70: st.success("🟢 Strong Candidate")
-    elif prob>50: st.warning("🟡 Watchlist")
-    else: st.error("🔴 Avoid")
-
-    st.subheader("Trend")
-    st.line_chart(df[['Close','50MA','150MA','200MA']])
+    if results:
+        table=pd.DataFrame(results).drop(columns=["df"])
+        table=table.sort_values("Prob",ascending=False)
+        st.dataframe(table,use_container_width=True)
