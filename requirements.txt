@@ -1,4 +1,8 @@
-beautifulsoup4
-requests
+streamlit
+yfinance
 pandas
-# already have streamlit, yfinance, etc.
+plotly
+requests
+matplotlib
+beautifulsoup4
+lxml
